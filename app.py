@@ -7,7 +7,6 @@ from datetime import datetime, date, timedelta
 # --- SETUP & CONFIG ---
 st.set_page_config(page_title="GharSathi", page_icon=":house:", layout="wide")
 DB_PATH = "gharsathi_live.db"
-ADMIN_PASSWORD = "admin123"
 
 # --- DB FUNCTIONS ---
 def get_conn():
@@ -36,6 +35,9 @@ init_db()
 def get_user(phone):
     conn = get_conn(); r = conn.execute("SELECT * FROM users WHERE phone=?", (phone,)).fetchone(); conn.close(); return r
 
+def update_user_status(phone, status):
+    conn = get_conn(); conn.execute("UPDATE users SET status=? WHERE phone=?", (status, phone)); conn.commit(); conn.close()
+
 def get_helper_by_user(user_id):
     conn = get_conn(); r = conn.execute("SELECT * FROM helpers WHERE user_id=?", (user_id,)).fetchone(); conn.close(); return r
 
@@ -51,7 +53,7 @@ def create_user(name, phone, role, masked_aadhaar, address, skills="", dr=0, mr=
         uid = cur.lastrowid
         if role == "helper":
             conn.execute("INSERT INTO helpers(user_id,skills,daily_rate,monthly_rate,area) VALUES(?,?,?,?,?)", (uid, skills, dr, mr, area))
-        conn.commit(); return True, f"Signup done! Masked Aadhaar: {masked_aadhaar}"
+        conn.commit(); return True, f"Signup done! Please verify via DigiLocker."
     except sqlite3.IntegrityError: return False, "Phone already registered."
     finally: conn.close()
 
@@ -79,7 +81,7 @@ def add_skip(booking_id, skip_date):
     conn.execute("INSERT INTO skips(booking_id,skip_date) VALUES(?,?)", (booking_id, skip_date))
     conn.commit(); conn.close(); return True, "Skipped!"
 
-# --- VALIDATORS (Verhoeff) ---
+# --- VALIDATORS (Verhoeff Algorithm for Aadhaar) ---
 _V_D = [[0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],[3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],[6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],[8,7,6,5,9,3,2,1,0,4],[9,8,7,6,5,4,3,2,1,0]]
 _V_P = [[0,1,2,3,4,5,6,7,8,9],[1,5,7,6,2,8,3,0,9,4],[5,8,0,3,7,9,6,1,4,2],[8,9,1,6,0,4,3,5,2,7],[9,4,5,3,1,2,6,8,7,0],[4,2,8,6,5,7,3,9,0,1],[2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]]
 def _verhoeff_valid(num):
@@ -104,46 +106,53 @@ def validate_aadhaar(aadhaar):
 
 # --- APP UI ---
 if "phone" not in st.session_state: st.session_state.phone = None
-if "admin" not in st.session_state: st.session_state.admin = False
+if "digilocker_mock_step" not in st.session_state: st.session_state.digilocker_mock_step = 0
 
 with st.sidebar:
     st.title("GharSathi")
-    if st.session_state.admin:
-        st.success("Admin logged in")
-        if st.button("Logout"): st.session_state.admin = False; st.rerun()
-    elif st.session_state.phone:
+    if st.session_state.phone:
         u = get_user(st.session_state.phone)
         st.success(f"{u[1]} ({u[3]})")
-        if st.button("Logout"): st.session_state.phone = None; st.rerun()
+        if st.button("Logout"): 
+            st.session_state.phone = None
+            st.session_state.digilocker_mock_step = 0
+            st.rerun()
 
-if st.session_state.admin:
-    st.header("Admin - Verification Panel")
-    conn = get_conn()
-    pending = conn.execute("SELECT * FROM users WHERE status='pending'").fetchall()
-    conn.close()
-    if not pending: st.info("No pending verifications.")
-    for u in pending:
-        with st.expander(f"{u[1]} - {u[3].upper()} - {u[2]}"):
-            st.write(f"Masked Aadhaar: {u[4]} | Address: {u[5]}")
-            c1, c2 = st.columns(2)
-            if c1.button("Approve", key=f"a{u[0]}"):
-                conn = get_conn(); conn.execute("UPDATE users SET status='verified' WHERE id=?", (u[0],)); conn.commit(); conn.close(); st.rerun()
-            with c2:
-                reason = st.text_input("Reason", key=f"r{u[0]}")
-                if st.button("Reject", key=f"rb{u[0]}", disabled=not reason):
-                    conn = get_conn(); conn.execute("UPDATE users SET status='rejected', rejection_reason=? WHERE id=?", (reason, u[0])); conn.commit(); conn.close(); st.rerun()
-    st.stop()
-
+# USER DASHBOARD
 if st.session_state.phone:
     me = get_user(st.session_state.phone)
     st.header(f"Hi {me[1]}")
     
-    # 🟢 YAHAN INDEX FIX KIYA HAI (me[7] status hai, me[8] rejection reason)
+    # 🟢 DIGILOCKER MOCK VERIFICATION
     if me[7] != "verified":
-        st.warning(f"Status: {me[7]}. Please wait for Admin approval.")
-        if me[8]: st.error(f"Reason: {me[8]}")
-        st.stop()
+        st.warning("Your account is not verified. Please complete KYC via DigiLocker.")
         
+        if st.session_state.digilocker_mock_step == 0:
+            with st.form("digilocker_init_form"):
+                st.info(f"Registered Aadhaar: **{me[4]}**")
+                if st.form_submit_button("🔐 Verify with DigiLocker"):
+                    st.session_state.digilocker_mock_step = 1
+                    st.rerun()
+        
+        elif st.session_state.digilocker_mock_step == 1:
+            st.subheader("DigiLocker Authorization")
+            with st.expander("Mock DigiLocker Consent Screen", expanded=True):
+                st.markdown("### DigiLocker Secure Connect")
+                st.write(f"**App:** GharSathi | **Aadhaar:** {me[4]}")
+                st.write("GharSathi is requesting your Aadhaar Profile for KYC.")
+                col1, col2 = st.columns(2)
+                if col1.button("✅ Approve & Share"):
+                    update_user_status(me[2], "verified")
+                    st.session_state.digilocker_mock_step = 0
+                    st.success("✅ KYC Completed! Account Activated.")
+                    st.rerun()
+                if col2.button("❌ Deny"):
+                    st.error("Access Denied. Cannot use app.")
+                    st.session_state.digilocker_mock_step = 0
+                    st.rerun()
+        st.stop() # Stop here until verified
+        
+    # DASHBOARD (If KYC verified)
     if me[3] == "customer":
         st.subheader("Verified Helpers")
         helpers = get_verified_helpers()
@@ -174,7 +183,7 @@ if st.session_state.phone:
                         if get_skip_count(b[0]) >= 4: st.error("Limit over")
                         else: add_skip(b[0], sk.isoformat()); st.rerun()
                         
-    else: # HELPER
+    else: 
         h = get_helper_by_user(me[0])
         st.subheader("My Bookings")
         total = 0
@@ -184,14 +193,13 @@ if st.session_state.phone:
         st.metric("Expected Earnings", f"Rs {total}")
     st.stop()
 
-# AUTHENTICATION
-tab1, tab2, tab3 = st.tabs(["Login", "Signup", "Admin"])
+# AUTHENTICATION (Login & Signup)
+tab1, tab2 = st.tabs(["Login", "Signup"])
 with tab1:
     phone = st.text_input("Phone", key="l_p")
     if st.button("Login"):
-        p_ok, p_clean, p_err = validate_phone(phone) # FIX: Cleaning phone number
-        if not p_ok:
-            st.error(p_err)
+        p_ok, p_clean, p_err = validate_phone(phone)
+        if not p_ok: st.error(p_err)
         elif get_user(p_clean): 
             st.session_state.phone = p_clean
             st.rerun()
@@ -219,11 +227,8 @@ with tab2:
             elif not consent: st.error("Consent required")
             else:
                 ok, msg = create_user(name, p_clean, r, a_mask, addr, skills, dr, mr, area)
-                if ok: st.success(msg + " Wait for admin approval.")
+                if ok: 
+                    st.success(msg)
+                    st.session_state.phone = p_clean
+                    st.rerun()
                 else: st.error(msg)
-
-with tab3:
-    pw = st.text_input("Admin Password", type="password")
-    if st.button("Login Admin"):
-        if pw == ADMIN_PASSWORD: st.session_state.admin = True; st.rerun()
-        else: st.error("Wrong password")
